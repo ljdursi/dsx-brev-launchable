@@ -96,3 +96,41 @@ Each of these cost real debugging time:
 booth, and `dsx-run.sh` is still the right tool for restarting a running demo.
 
 Full history, gotchas and evidence: `background/ai-factory-demo-setup-runbook.md`.
+
+## 8. Planned for v2 — the AI agent
+
+v1 deliberately ships without the AI-agent extension: the 3D viewer, camera
+controls, configurator and CFD/thermal sims all work without it, and it adds
+moving parts. Enabling it needs **three** things, not just the API key — two of
+which we have observed directly on every run so far.
+
+1. **`NVIDIA_API_KEY` launch parameter.** Optional, no default; get a key from
+   [build.nvidia.com](https://build.nvidia.com/). The setup script already
+   handles it if present.
+
+2. **Port `8012/TCP` must also be declared.** The agent exposes its HTTP API
+   there (`DSX_AGENT_PORT`). Without it the web client logs
+   `GET http://<ip>:8012/api/agent/preferences/local-user net::ERR_CONNECTION_TIMED_OUT`
+   and `[ConfiguratorPanel] Failed to load GPU preference` — observed on every
+   deploy to date, and harmless while the agent is disabled.
+
+3. **A `typing_extensions` fix.** All four `omni.ai.*` extensions currently fail
+   to import with
+   `TypeError: _TypedDictMeta.__new__() got an unexpected keyword argument 'extra_items'`,
+   all on the same line of one vendored dependency — so it is one broken dep,
+   not four problems. The bundled `typing_extensions` predates PEP 728's
+   `extra_items`. From the blueprint root:
+   ```bash
+   python3 -m pip install --upgrade --target \
+     _build/linux-x86_64/release/exts/omni.ai.langchain.core/pip_core_prebundle \
+     "typing_extensions>=4.13"
+   ```
+   (Add `--break-system-packages` on 24.04 if pip objects — harmless with
+   `--target`. If a *different* import error then appears, pin
+   `typing_extensions==4.13.2`.) Reversible: a clean rebuild restores the
+   original.
+
+**These errors are non-fatal.** Kit reaches `RTX ready` and the demo works with
+them present, which is why v1 leaves them alone. Anything claiming the agent is
+enabled should be verified against the extension load errors in the Kit log, not
+assumed from the key being set.

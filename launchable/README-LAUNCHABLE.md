@@ -83,10 +83,15 @@ blocks until the renderer reports ready and prints the URL.
 is drawn client-side, so it proves nothing — and the viewport stays black while
 Kit logs `Got stop event while waiting for client connection`.
 
-> 🚩 **Restrict the rules to the deployer's IP, not "all IPs", if the booth
-> allows it.** `primaryStream` serves **one interactive viewer**; a second
-> browser on the same URL can kick the first (`NVST_R_BUSY`). With open rules,
-> anyone holding the URL can take the demo down mid-conversation.
+> 🔴 **Use "all IPs". Do NOT restrict to the deploying host** — tested
+> 2026-09-02 on two deploys minutes apart: restricted, **every port timed out
+> and the demo was unreachable**; "all IPs", everything worked. It would also be
+> fragile even if it worked, since the egress IP rotates between days.
+>
+> That leaves the one-viewer problem unsolved at the network layer:
+> `primaryStream` serves **one interactive viewer**, and a second browser can
+> kick the first (`NVST_R_BUSY`). Control access above the network instead —
+> `authenticateBearer`, Secure Links, or not circulating the URL.
 
 ## 5. Access
 

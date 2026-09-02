@@ -19,8 +19,9 @@
 #   (that is drawn client-side) and the viewport stays black.
 #
 #   ⚠️ ONE VIEWER AT A TIME. primaryStream serves a single interactive client;
-#   a second browser can kick the first (NVST_R_BUSY). Prefer restricting the
-#   port rules to the deployer's IP rather than "all IPs".
+#   a second browser can kick the first (NVST_R_BUSY). Note that restricting the
+#   port rules to the deploying host does NOT work (tested 2026-09-02: every
+#   port timed out) -- use "all IPs" and control access above the network.
 set -uo pipefail
 
 log()  { printf '\n== %s\n' "$*"; }
@@ -270,7 +271,8 @@ $( case "$LS_VERS" in
     47998/TCP + UDP   media   <-- UDP is what carries the video
 
   ⚠️ ONE VIEWER AT A TIME. A second browser on this URL can kick the first
-     (NVST_R_BUSY). Restrict the port rules to the deployer's IP if you can.
+     (NVST_R_BUSY). IP-restricting the ports does NOT work -- use "all IPs"
+     and keep the URL off shared channels.
 
   Logs:  $KIT_LOG   $WEB_LOG
   Restart kit:  sudo -u $APP_USER tmux kill-session -t dsx-kit; then re-run this script

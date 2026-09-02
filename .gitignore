@@ -1,0 +1,10 @@
+# local secrets — never commit
+*.env
+.dsx.env
+dsx.env
+.dsx-secrets
+# logs from test runs
+*.log
+# editor droppings
+*.swp
+*.swo

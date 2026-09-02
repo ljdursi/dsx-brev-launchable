@@ -1,0 +1,98 @@
+# DSX Brev Launchable — configuration
+
+Everything the Brev dashboard needs, plus why each setting is what it is. The
+setup script is `dsx-launchable-setup.sh`; it is self-contained and clones the
+public blueprint itself, so it works pasted into the dashboard or fetched from a
+repo.
+
+> ⚠️ **Status: NOT YET DEPLOYED.** The script encodes a bring-up proven by hand
+> and by the CLI scripts on 2026-09-01/02, but it has never itself been run by a
+> Launchable. Treat the first deploy as a test, not a demo.
+
+## 1. Hardware
+
+| Setting | Value | Why |
+|---|---|---|
+| GPU | **RTX PRO 6000 Blackwell** (AWS `g7e.*`) | DSX needs RT cores. Confirmed: `g7e.4xlarge` is a real RTX PRO 6000 Blackwell Server Edition. |
+| Size | **`g7e.4xlarge`** (~$4.80/hr) | 128 GB RAM, best RAM-per-dollar for one stream. More GPUs do **not** help — one Kit stream renders on ONE GPU. |
+| Firewall | **configurable ports required** | Only the AWS `g7e.*` family qualifies. The cheaper `massedcompute_RTXPro6000` ($2.63/hr) cannot open 47998/UDP, so it can never stream. |
+| Disk | **250 GB+** | ~33 GB archive + ~33 GB extracted + build + shader cache. |
+| **Region** | **near Montreal** (`us-east-1` / `us-east-2` / `ca-central-1`) | ⚠️ **The main reason to use a Launchable rather than the CLI.** `brev create` has no region control at all; identical invocations landed in Tokyo and Ohio on consecutive days. Tokyo→Montreal is ~150–200 ms vs Ohio's ~30 ms — the difference between responsive and broken. |
+
+## 2. Mode and setup script
+
+**VM Mode**, with `dsx-launchable-setup.sh` as the setup script. Brev runs it
+automatically, as root, after the instance starts.
+
+Expect **~25–40 minutes** on first deploy: dependencies, a 33 GB download and
+extraction, then a first build inside `run_streaming.sh` (~12 min). The script
+blocks until the renderer reports ready and prints the URL.
+
+## 3. Launch parameters
+
+| Parameter | Required | Notes |
+|---|---|---|
+| `NGC_API_KEY` | **yes** | **Define with NO DEFAULT** and back it with an **organization secret** (one already exists in the target org). NVIDIA's own guidance: do not store reusable credentials as parameter defaults. ⚠️ The parameter must be named **exactly** `NGC_API_KEY` — Brev passes parameters in as env vars of the same name, and the script fails fast if it is absent. The script writes it to `~/.ngc/config` (mode 0600) and **keeps it**, so a stop/start that wipes an instance-store content pack can re-download without a re-deploy. That is a deliberate call: it is a read-only key on a VM that is stopped when idle and revoked after the conference. `DSX_SHRED_NGC_CONFIG=1` removes it after the download if you prefer. **The risk being managed is a key in a searchable public repo** — hence the org secret, and hence no credential in any version-controlled file. |
+| `NVIDIA_API_KEY` | no | AI-agent extension only. The viewer, camera and configurator all work without it. |
+
+## 4. Ports
+
+| Port | Protocol | Purpose |
+|---|---|---|
+| 8081 | TCP | web UI |
+| 49100 | TCP | signalling |
+| **47998** | **TCP *and* UDP** | media |
+
+**47998 must include UDP.** Without it the page loads, the globe renders — that
+is drawn client-side, so it proves nothing — and the viewport stays black while
+Kit logs `Got stop event while waiting for client connection`.
+
+> 🚩 **Restrict the rules to the deployer's IP, not "all IPs", if the booth
+> allows it.** `primaryStream` serves **one interactive viewer**; a second
+> browser on the same URL can kick the first (`NVST_R_BUSY`). With open rules,
+> anyone holding the URL can take the demo down mid-conversation.
+
+## 5. Access
+
+- **View access: "Only my organization"** — restricts who can view/deploy to
+  members of your Brev org, and ties the credit pool to the demo.
+- **Secure Links** put NVIDIA-account login in front of the HTTP service. Worth
+  evaluating: it would also mitigate the one-viewer problem by gating who can
+  reach the page at all. Untested by us.
+- Turn **Jupyter off** if the mode allows. `brev create` installs JupyterLab by
+  default bound to `0.0.0.0:8888` with an **empty token and password** — an
+  unauthenticated code-execution surface on a conference machine.
+
+## 6. What the script encodes that the blueprint README omits
+
+Each of these cost real debugging time:
+
+1. **The GL/X library bundle** — Kit will not start on a headless cloud image
+   without it (`libXt.so.6: cannot open shared object`). Not in the README.
+   `libxt6` is installed separately because 24.04 renamed it `libxt6t64`.
+2. **NGC CLI needs an org** — the documented download path fails with
+   `Missing org - If Authenticated, org is also required`.
+3. **The content pack has an extra directory level** — the scene is at
+   `<extract>/DSX_BP_/DSX_BP/Assembly/`, not `<extract>/DSX_BP/Assembly/`. The
+   script finds it rather than hardcoding.
+4. **Do NOT pre-build with `./repo.sh build`** — it resolves livestream
+   **9.0.0**, which cannot stream, because `primaryStream.publicIp` is silently
+   ignored on it. Letting `run_streaming.sh` build on first launch resolves
+   **9.1.0 / 9.2.0**, which works. This was the single hardest bug of the
+   project.
+5. **`primaryStream.publicIp` is required** — Kit is ICE-Lite and otherwise
+   advertises only private candidates.
+6. **The ready line is `RTX ready`** — lowercase, and written to **stdout only**,
+   never to `kit_*.log`.
+7. **There is no `streaming.html`** — the URL is `/?server=…&signalingPort=…`.
+   Vite's SPA fallback serves the wrong path happily, which hides the mistake.
+
+## 7. Relationship to the scripts in `../scripts/`
+
+`scripts/` is the **backup path** and the source material this was derived from:
+`launch-dsx-brev.sh` (laptop-side create/provision/launch), `dsx-setup.sh`
+(provision), `dsx-run.sh` (launch, restart tiers, `check-ports`,
+`diagnose`). They remain the fallback if a Launchable deploy misbehaves at the
+booth, and `dsx-run.sh` is still the right tool for restarting a running demo.
+
+Full history, gotchas and evidence: `background/ai-factory-demo-setup-runbook.md`.

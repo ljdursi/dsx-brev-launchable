@@ -5,9 +5,38 @@ setup script is `dsx-launchable-setup.sh`; it is self-contained and clones the
 public blueprint itself, so it works pasted into the dashboard or fetched from a
 repo.
 
-> ⚠️ **Status: NOT YET DEPLOYED.** The script encodes a bring-up proven by hand
-> and by the CLI scripts on 2026-09-01/02, but it has never itself been run by a
-> Launchable. Treat the first deploy as a test, not a demo.
+> ✅ **Status: DEPLOYED AND WORKING (2026-09-02).** One click to a streaming
+> demo in **~18 minutes** — dependencies, a 32.69 GB content pack in 2m 6s, the
+> build, and `RTX ready`. Verified: livestream **9.1.0/9.1.0/9.2.0**, tmux
+> surviving the setup script exiting, and streaming to a browser.
+
+## 0. How the secret actually reaches the script (learned the hard way)
+
+The first deploy failed in 7 seconds with
+`NGC_API_KEY launch parameter is required`. It is a **two-step** binding and the
+second step is easy to miss:
+
+1. **On the Launchable:** define a **Text** launch parameter named exactly
+   `NGC_API_KEY`. *"The parameter name controls the environment variable name;
+   the secret name does not need to match it."*
+2. **At deploy time:** find that parameter under **"Setup values"**, choose
+   **"Use a secret"**, and select the secret and version.
+
+Miss step 2 and the parameter arrives empty, which looks exactly like never
+having defined it.
+
+**Execution model**, useful when debugging a failed deploy:
+
+- Brev runs the setup script as a **systemd oneshot unit** (`User=ubuntu`, *not*
+  root), logging to `/home/ubuntu/.lifecycle-script-*.log`.
+- `TimeoutStartSec=0` and Brev polls with an 86400 s budget, so **a long setup
+  script is fine** — ours blocks for up to 40 minutes.
+- `KillMode=process` means only the main process is reaped when the unit exits,
+  so **tmux sessions survive** the setup script finishing. Verified.
+- Launch parameters **do not persist**: *"After setup finishes, the value is not
+  automatically available in a later SSH session."* That is why the script keeps
+  `~/.ngc/config` — otherwise a re-download after a stop/start would be
+  impossible without a re-deploy.
 
 ## 1. Hardware
 
@@ -42,6 +71,13 @@ blocks until the renderer reports ready and prints the URL.
 | 8081 | TCP | web UI |
 | 49100 | TCP | signalling |
 | **47998** | **TCP *and* UDP** | media |
+
+> ⚠️ **Re-check the port list after any edit.** On 2026-09-02, adding `8012` to
+> an existing Launchable **silently dropped the other three**, and the deploy
+> came up with everything blocked. The symptom is a browser timeout ("took too
+> long to respond") rather than "connection refused" — timeout means the
+> firewall dropped it; refused means it arrived and nothing was listening. Verify
+> with `./scripts/launch-dsx-brev.sh <name> --check-ports` before trusting it.
 
 **47998 must include UDP.** Without it the page loads, the globe renders — that
 is drawn client-side, so it proves nothing — and the viewport stays black while

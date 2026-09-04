@@ -311,13 +311,60 @@ diagnose() {
     warn "  primaryStream serves exactly ONE interactive client. A second browser"
     warn "  opening the demo URL gets a timeout box offering 'start a new session',"
     warn "  and retrying can KICK the first viewer. Reported live 2026-09-02."
-    warn "  At the booth: restrict the dashboard port rules to the booth machine's"
-    warn "  IP, or anyone with the URL can take the demo down mid-conversation."
-    warn "  For a second viewer, configure a spectatorStream (see runbook)."
+    warn "  Use 'all IPs' for the Brev port rules — restricting them to the booth"
+    warn "  machine was tested and made every port unreachable. Control access with"
+    warn "  Secure Links / bearer authentication, or keep the URL private."
+    warn "  Use separate instances for concurrent practice; spectatorStream is an"
+    warn "  untested option for additional viewers (see runbook)."
     hit=1; }
   grep -qi 'extra_items' "$KIT_LOG" 2>/dev/null && \
     info "note: omni.ai.* 'extra_items' errors are BENIGN (AI-agent stretch goal, runbook §3a)"
   return $hit
+}
+
+# The livestream version is the difference between a demo and a black viewport,
+# and it is only knowable after Kit has loaded its extensions. Prefer the stdout
+# capture for the current run (it is truncated by start_kit), then fall back to
+# the newest native Kit log when checking an older or externally-started run.
+check_livestream_versions() {
+  local kitlog="" candidate vers
+  local version_re='omni\.kit\.livestream\.[a-z]+-[0-9.]+'
+  local native_log_dir="$HOME/.nvidia-omniverse/logs/Kit/DSX Streaming/2.0"
+
+  if grep -qE "$version_re" "$KIT_LOG" 2>/dev/null; then
+    kitlog="$KIT_LOG"
+  else
+    while IFS= read -r candidate; do
+      if [ -z "$kitlog" ] || [ "$candidate" -nt "$kitlog" ]; then
+        kitlog="$candidate"
+      fi
+    done < <(find "$native_log_dir" -maxdepth 1 -type f -name '*.log' -print 2>/dev/null || true)
+  fi
+
+  if [ -z "$kitlog" ]; then
+    info "not found yet (Kit may still be starting)"
+    return 0
+  fi
+
+  vers="$(grep -oE "$version_re" "$kitlog" 2>/dev/null | sort -u | tr '\n' ' ' || true)"
+  if [ -z "$vers" ]; then
+    info "not found in $kitlog"
+    return 0
+  fi
+
+  info "$vers"
+  if [[ "$vers" == *app-9.0.0* || "$vers" == *core-9.0.0* ]]; then
+    warn "🔴 livestream 9.0.0 loaded — STREAMING CANNOT WORK."
+    warn "   On 9.0.0 primaryStream.publicIp is silently ignored, so Kit advertises"
+    warn "   only private ICE candidates and the browser stalls at 'checking'."
+    warn "   Fix: rebuild WITHOUT ./repo.sh build (DSX_SKIP_BUILD=1, the default)"
+    warn "   and let run_streaming.sh build on first launch."
+  elif [[ "$vers" == *app-9.1.0* && "$vers" == *core-9.1.0* && "$vers" == *webrtc-9.2.0* ]]; then
+    info "  ✅ the combination proven to stream"
+  else
+    warn "unverified livestream version combination — expected app/core 9.1.0 and webrtc 9.2.0"
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------

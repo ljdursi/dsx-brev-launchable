@@ -15,6 +15,7 @@
 #
 #   PORTS the Launchable must declare (see README-LAUNCHABLE.md):
 #     8081/TCP  web UI      49100/TCP  signalling      47998/TCP+UDP  media
+#     8012/TCP  AI agent
 #   47998 MUST include UDP. Without it the page loads, the globe renders
 #   (that is drawn client-side) and the viewport stays black.
 #
@@ -62,7 +63,7 @@ $APT update -y >/dev/null 2>&1 || true
 $APT install -y \
   libglu1-mesa libgl1 libxrandr2 libxinerama1 libxcursor1 libxi6 libxext6 \
   libsm6 libice6 libxkbcommon0 \
-  build-essential curl wget ca-certificates unzip tmux git \
+  build-essential curl wget ca-certificates unzip tmux git python3-pip \
   || die "dependency install failed"
 
 # Installed separately on purpose: Ubuntu 24.04's t64 transition renamed this to
@@ -226,11 +227,52 @@ info "public IP: $PUB_IP"
 # only 127.0.0.1 / 172.31.x.x / 172.17.0.1, none of which a browser can route to.
 KIT_LOG="$APP_HOME/dsx-kit.log"
 WEB_LOG="$APP_HOME/dsx-web.log"
-$SUDO -u "$APP_USER" bash -c "cd '$WORKDIR' && tmux kill-session -t dsx-kit 2>/dev/null; tmux kill-session -t dsx-web 2>/dev/null; true"
-$SUDO -u "$APP_USER" bash -c "cd '$WORKDIR' && tmux new-session -d -s dsx-kit \
-  \"./run_streaming.sh --/exts/omni.kit.livestream.app/primaryStream/publicIp=$PUB_IP 2>&1 | tee '$KIT_LOG'\""
-$SUDO -u "$APP_USER" bash -c "cd '$WORKDIR' && VITE_OMNIVERSE_SERVER='$PUB_IP' VITE_SIGNALING_PORT=49100 \
-  tmux new-session -d -s dsx-web \"./run_web.sh 2>&1 | tee '$WEB_LOG'\""
+AGENT_PORT=8012
+
+start_kit() {
+  $SUDO -u "$APP_USER" bash -c "cd '$WORKDIR' && \
+    tmux kill-session -t dsx-kit 2>/dev/null; : > '$KIT_LOG'; \
+    tmux new-session -d -s dsx-kit \
+    \"if [ -f '$APP_HOME/.dsx-agent-env' ]; then . '$APP_HOME/.dsx-agent-env'; fi; \
+      export DSX_AGENT_PORT=$AGENT_PORT; \
+      ./run_streaming.sh --/exts/omni.kit.livestream.app/primaryStream/publicIp=$PUB_IP \
+      2>&1 | tee '$KIT_LOG'\""
+}
+
+wait_renderer() {
+  READY=0
+  for i in $(seq 1 90); do          # 90 x 20s = 30 min; first build ~12 min
+    if grep -qi 'RTX ready' "$KIT_LOG" 2>/dev/null; then READY=1; break; fi
+    sleep 20
+  done
+}
+
+repair_agent_dependency() {
+  local target
+  target="$(find "$WORKDIR/_build" -type d \
+    -path '*/exts/omni.ai.langchain.core/pip_core_prebundle' \
+    -print -quit 2>/dev/null || true)"
+  if [ -z "$target" ]; then
+    warn "AI agent hit the typing_extensions error, but its prebundle was not found"
+    return 1
+  fi
+
+  log "repairing AI agent typing_extensions dependency"
+  if ! $SUDO -u "$APP_USER" python3 -m pip install \
+      --disable-pip-version-check --no-cache-dir --upgrade --target "$target" \
+      'typing_extensions==4.13.2'; then
+    $SUDO -u "$APP_USER" python3 -m pip install \
+      --disable-pip-version-check --no-cache-dir --break-system-packages \
+      --upgrade --target "$target" 'typing_extensions==4.13.2' || return 1
+  fi
+  info "agent dependency repaired; restarting Kit once"
+}
+
+$SUDO -u "$APP_USER" bash -c "tmux kill-session -t dsx-web 2>/dev/null; true"
+start_kit
+$SUDO -u "$APP_USER" bash -c "cd '$WORKDIR' && tmux new-session -d -s dsx-web \
+  \"VITE_OMNIVERSE_SERVER='$PUB_IP' VITE_SIGNALING_PORT=49100 \
+    VITE_DSX_AGENT_PORT=$AGENT_PORT ./run_web.sh 2>&1 | tee '$WEB_LOG'\""
 info "kit + web launched under tmux (logs: $KIT_LOG, $WEB_LOG)"
 
 # ---------------------------------------------------------------------------
@@ -241,11 +283,40 @@ log "[6/6] waiting for the renderer"
 # file, or matching "RTX Ready" case-sensitively, finds nothing on a perfectly
 # healthy run. That one character cost a full day on 2026-09-01.
 # "app ready" (~25s) is NOT readiness: the scene is still loading.
-READY=0
-for i in $(seq 1 90); do            # 90 x 20s = 30 min; first build ~12 min
-  if grep -qi 'RTX ready' "$KIT_LOG" 2>/dev/null; then READY=1; break; fi
-  sleep 20
-done
+wait_renderer
+
+# The prebundle does not exist until run_streaming.sh completes its first build.
+# Repair only the observed PEP 728 failure, then restart Kit so its Python
+# modules are imported from the repaired bundle.
+if [ -n "${NVIDIA_API_KEY:-}" ] && grep -qi 'extra_items' "$KIT_LOG" 2>/dev/null; then
+  if repair_agent_dependency; then
+    start_kit
+    wait_renderer
+  else
+    warn "AI agent dependency repair failed"
+  fi
+fi
+
+AGENT_READY=0
+if [ -n "${NVIDIA_API_KEY:-}" ]; then
+  for i in $(seq 1 30); do
+    AGENT_HEALTH="$(curl -fsS -m 3 \
+      "http://127.0.0.1:$AGENT_PORT/api/agent/health" 2>/dev/null || true)"
+    if [[ "$AGENT_HEALTH" =~ \"agent_available\"[[:space:]]*:[[:space:]]*true ]] &&
+       [[ "$AGENT_HEALTH" =~ \"api_key_set\"[[:space:]]*:[[:space:]]*true ]]; then
+      AGENT_READY=1
+      break
+    fi
+    sleep 2
+  done
+  if [ "$AGENT_READY" -eq 1 ]; then
+    info "AI agent ready on $AGENT_PORT/TCP"
+  else
+    warn "AI agent did not report agent_available=true on $AGENT_PORT/TCP"
+  fi
+else
+  info "AI agent disabled (NVIDIA_API_KEY launch parameter was not supplied)"
+fi
 
 LS_VERS="$(grep -ohE 'omni\.kit\.livestream\.[a-z]+-[0-9.]+' \
            "$APP_HOME/.nvidia-omniverse/logs/Kit/DSX Streaming/2.0/"*.log 2>/dev/null | sort -u | tr '\n' ' ')"
@@ -265,10 +336,15 @@ $( case "$LS_VERS" in
      *)           echo "  ⚠️ could not read the livestream versions" ;;
    esac )
 
+  AI agent: $( if [ -z "${NVIDIA_API_KEY:-}" ]; then
+                 echo "disabled (no NVIDIA_API_KEY)"
+               elif [ "$AGENT_READY" -eq 1 ]; then echo "ready"; else echo "NOT READY"; fi )
+
   Ports this Launchable must declare:
     8081/TCP   web UI
     49100/TCP  signalling
     47998/TCP + UDP   media   <-- UDP is what carries the video
+    8012/TCP   AI agent
 
   ⚠️ ONE VIEWER AT A TIME. A second browser on this URL can kick the first
      (NVST_R_BUSY). IP-restricting the ports does NOT work -- use "all IPs"
@@ -279,3 +355,6 @@ $( case "$LS_VERS" in
 ============================================================
 BANNER
 [ "$READY" -eq 1 ] || exit 1
+if [ -n "${NVIDIA_API_KEY:-}" ] && [ "$AGENT_READY" -ne 1 ]; then
+  exit 1
+fi

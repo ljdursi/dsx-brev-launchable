@@ -60,7 +60,7 @@ STATE_DIR="$HOME/.dsx"
 # ---------------------------------------------------------------------------
 # ports — THE CONTRACT THIS SHARES WITH THE LAUNCHABLE
 # ---------------------------------------------------------------------------
-# The three ports the demo needs reachable from outside. How they get opened is
+# The four ports the demo needs reachable from outside. How they get opened is
 # the ONE thing that differs between the two ways of running this:
 #   * CLI path (launch-dsx-brev.sh) — opened BY HAND in the Brev dashboard.
 #     No brev CLI command edits firewall rules; `brev port-forward` is TCP-only
@@ -71,6 +71,7 @@ STATE_DIR="$HOME/.dsx"
 WEB_PORT=8081
 SIGNAL_PORT=49100
 MEDIA_PORT=47998
+AGENT_PORT=8012
 PORTS_DECLARED="${DSX_PORTS_DECLARED:-0}"
 
 ports_table() {
@@ -78,6 +79,7 @@ ports_table() {
   printf '%s%-7s web UI      TCP\n' "$i" "$WEB_PORT"
   printf '%s%-7s signaling   TCP\n' "$i" "$SIGNAL_PORT"
   printf '%s%-7s media       TCP *and* UDP   <-- UDP carries the video\n' "$i" "$MEDIA_PORT"
+  printf '%s%-7s AI agent    TCP\n' "$i" "$AGENT_PORT"
 }
 
 ME="$(id -un)"                                   # $USER is unset in non-login/Launchable shells
@@ -218,7 +220,7 @@ apt_get update
 apt_get install -y \
   libglu1-mesa libgl1 libxrandr2 libxinerama1 libxcursor1 libxi6 libxext6 \
   libsm6 libice6 libxkbcommon0 \
-  build-essential curl wget ca-certificates unzip tmux
+  build-essential curl wget ca-certificates unzip tmux python3-pip
 
 # libxt6 is installed SEPARATELY on purpose: Ubuntu 24.04's t64 transition renamed it
 # to libxt6t64, and folding it into the bundle above means one missing package takes
@@ -474,7 +476,7 @@ if [ -n "${NVIDIA_API_KEY:-}" ]; then
 fi
 
 if [ "$PORTS_DECLARED" = "1" ]; then
-  PORTS_NOTE="OK  Ports $WEB_PORT/TCP, $SIGNAL_PORT/TCP, $MEDIA_PORT/TCP+UDP are declared upstream —
+  PORTS_NOTE="OK  Ports $WEB_PORT/TCP, $SIGNAL_PORT/TCP, $MEDIA_PORT/TCP+UDP and $AGENT_PORT/TCP are declared upstream —
     nothing to open by hand."
 else
   PORTS_NOTE="⚠️  IF YOU HAVE NOT ALREADY (this was flagged at the start of provisioning) —

@@ -25,6 +25,7 @@ Start with `launchable/README-LAUNCHABLE.md`.
 
 ```bash
 export NGC_API_KEY='...'                      # never hardcoded; shipped 0600, shredded remotely
+export NVIDIA_API_KEY='...'                   # enables the AI agent; optional
 ./scripts/launch-dsx-brev.sh --check          # probe the CLI, spend nothing
 ./scripts/launch-dsx-brev.sh my-dsx           # create + provision + launch
 ./scripts/launch-dsx-brev.sh my-dsx --check-ports   # verify the firewall end to end
@@ -61,8 +62,8 @@ Each of these is a real failure we hit, and each is silent or misleading:
    `http://<ip>:8081/?server=<ip>&signalingPort=49100`. Vite's SPA fallback
    serves the wrong path happily, hiding the mistake.
 8. **One viewer at a time.** `primaryStream` serves a single interactive client;
-   a second browser can kick the first (`NVST_R_BUSY`). Restrict the port rules
-   to one IP if the demo matters.
+   a second browser can kick the first (`NVST_R_BUSY`). Use the tested “all IPs”
+   rules and avoid opening a second browser against the same instance.
 9. **The Brev CLI cannot choose a region** — no flag, and no region in its data
    model. The dashboard can. Identical invocations landed in Tokyo and Ohio on
    consecutive days, which is the difference between a responsive demo and a
@@ -75,6 +76,7 @@ Each of these is a real failure we hit, and each is silent or misleading:
 | 8081 | TCP | web UI |
 | 49100 | TCP | signalling |
 | **47998** | **TCP *and* UDP** | media — **UDP is what carries video** |
+| 8012 | TCP | AI-agent HTTP API |
 
 The CLI cannot open these; use the Brev dashboard (a Launchable declares them).
 Verify rather than assume:

@@ -45,6 +45,7 @@ WAIT=1
 WEB_PORT=8081
 SIGNAL_PORT=49100
 MEDIA_PORT=47998
+AGENT_PORT=8012
 
 log()  { printf '\n== %s\n' "$*"; }
 info() { printf '   %s\n' "$*"; }
@@ -177,7 +178,7 @@ start_kit() {
   local stream_args="--/exts/omni.kit.livestream.app/primaryStream/publicIp=$pub_ip"
 
   tmux new-session -d -s "$KIT_SESSION" \
-    "cd '$DSX_WORKDIR' && ./run_streaming.sh $stream_args \
+    "cd '$DSX_WORKDIR' && DSX_AGENT_PORT='$AGENT_PORT' ./run_streaming.sh $stream_args \
        --/app/auto_load_usd='$DSX_SCENE' 2>&1 | tee '$KIT_LOG'"
   info "kit server launched (tmux: $KIT_SESSION, log: $KIT_LOG)"
   info "  publicIp override: $pub_ip  (requires livestream 9.1.0/9.2.0 — see runbook)"
@@ -191,6 +192,7 @@ start_web() {
   # is staffing the booth append ?server=... by hand (runbook Brev gotcha 2).
   tmux new-session -d -s "$WEB_SESSION" \
     "cd '$DSX_WORKDIR' && VITE_OMNIVERSE_SERVER='$pub_ip' VITE_SIGNALING_PORT='$SIGNAL_PORT' \
+       VITE_DSX_AGENT_PORT='$AGENT_PORT' \
        ./run_web.sh 2>&1 | tee '$WEB_LOG'"
   info "web frontend launched (tmux: $WEB_SESSION, log: $WEB_LOG)"
 }
@@ -288,6 +290,73 @@ wait_ready() {
   done
 }
 
+# The agent dependency bundle is created by run_streaming.sh's first build, so
+# the compatibility repair cannot run during provisioning. Apply it only after
+# the exact PEP 728/typing_extensions failure has been observed, then let the
+# caller restart Kit once. A clean rebuild removes both the repair and marker.
+agent_enabled() { [ -n "${NVIDIA_API_KEY:-}" ]; }
+
+agent_prebundle_dir() {
+  find "$DSX_WORKDIR/_build" -type d \
+    -path '*/exts/omni.ai.langchain.core/pip_core_prebundle' \
+    -print -quit 2>/dev/null || true
+}
+
+repair_agent_dependency() {
+  local target marker
+  agent_enabled || return 1
+  grep -qi 'extra_items' "$KIT_LOG" 2>/dev/null || return 1
+
+  target="$(agent_prebundle_dir)"
+  if [ -z "$target" ]; then
+    warn "AI agent hit the typing_extensions error, but its prebundle was not found."
+    return 2
+  fi
+  marker="$target/.dsx-typing-extensions-4.13.2"
+  if [ -f "$marker" ]; then
+    warn "AI agent still reports extra_items even though the dependency repair is marked installed."
+    return 2
+  fi
+
+  log "repairing AI agent typing_extensions dependency"
+  if ! python3 -m pip install --disable-pip-version-check --no-cache-dir \
+      --upgrade --target "$target" 'typing_extensions==4.13.2'; then
+    python3 -m pip install --disable-pip-version-check --no-cache-dir \
+      --break-system-packages --upgrade --target "$target" \
+      'typing_extensions==4.13.2' || {
+        warn "could not install typing_extensions==4.13.2 into $target"
+        return 2
+      }
+  fi
+  touch "$marker"
+  info "agent dependency repaired; Kit must restart once"
+  return 0
+}
+
+agent_health() {
+  local body
+  body="$(curl -fsS -m 3 "http://127.0.0.1:$AGENT_PORT/api/agent/health" 2>/dev/null || true)"
+  [[ "$body" =~ \"agent_available\"[[:space:]]*:[[:space:]]*true ]] &&
+    [[ "$body" =~ \"api_key_set\"[[:space:]]*:[[:space:]]*true ]]
+}
+
+wait_agent_ready() {
+  local i
+  if ! agent_enabled; then
+    info "AI agent: disabled (NVIDIA_API_KEY was not provisioned)"
+    return 0
+  fi
+  for i in $(seq 1 30); do
+    if agent_health; then
+      info "AI agent: ready on $AGENT_PORT/TCP"
+      return 0
+    fi
+    sleep 2
+  done
+  warn "AI agent did not report agent_available=true at http://127.0.0.1:$AGENT_PORT/api/agent/health"
+  return 1
+}
+
 # Known-bad patterns straight out of the runbook's gotcha table.
 diagnose() {
   local hit=0
@@ -317,8 +386,10 @@ diagnose() {
     warn "  Use separate instances for concurrent practice; spectatorStream is an"
     warn "  untested option for additional viewers (see runbook)."
     hit=1; }
-  grep -qi 'extra_items' "$KIT_LOG" 2>/dev/null && \
-    info "note: omni.ai.* 'extra_items' errors are BENIGN (AI-agent stretch goal, runbook §3a)"
+  grep -qi 'extra_items' "$KIT_LOG" 2>/dev/null && {
+    warn "AI agent dependency error: bundled typing_extensions lacks PEP 728 support."
+    warn "  Restart with '$0 kit'; startup repairs this automatically after the first build."
+    hit=1; }
   return $hit
 }
 
@@ -371,7 +442,7 @@ check_livestream_versions() {
 # subcommands
 # ---------------------------------------------------------------------------
 cmd_start() {
-  local which="${1:-both}" pub_ip
+  local which="${1:-both}" pub_ip repair_rc=1
   check_topology
   pub_ip="$(detect_public_ip)" || die "could not determine this instance's public IP.
   Set it explicitly and re-run:  DSX_PUBLIC_IP=<ip> $0 $which"
@@ -390,8 +461,21 @@ cmd_start() {
 
   local rc=0
   wait_ready "$READY_TIMEOUT" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    repair_rc=0
+    repair_agent_dependency || repair_rc=$?
+    if [ "$repair_rc" -eq 0 ]; then
+      start_kit "$pub_ip"
+      wait_ready "$READY_TIMEOUT" || rc=$?
+    elif [ "$repair_rc" -eq 2 ]; then
+      rc=1
+    fi
+  fi
   check_livestream_versions
   diagnose || true
+  if [ "$rc" -eq 0 ]; then
+    wait_agent_ready || rc=1
+  fi
   if [ "$rc" -ne 0 ]; then
     warn "not ready. Last 30 lines of $KIT_LOG:"
     tail -n 30 "$KIT_LOG" 2>/dev/null | sed 's/^/     /'
@@ -412,6 +496,7 @@ DSX IS UP.
     $WEB_PORT    web UI      TCP
     $SIGNAL_PORT   signaling   TCP
     $MEDIA_PORT   media       TCP + UDP   <-- UDP carries the video
+    $AGENT_PORT    AI agent    TCP
 
   Restart tiers (runbook §7):
     L1 browser froze   -> refresh the tab
@@ -453,7 +538,7 @@ cmd_status() {
   fi
 
   log "listeners (LOCAL sockets only)"
-  for p in "$WEB_PORT" "$SIGNAL_PORT" "$MEDIA_PORT"; do
+  for p in "$WEB_PORT" "$SIGNAL_PORT" "$MEDIA_PORT" "$AGENT_PORT"; do
     if ss -tuln 2>/dev/null | grep -q ":$p "; then info "port $p: listening"; else info "port $p: NOT listening"; fi
   done
   # Worth stating plainly: on 2026-08-31 every port here was listening and the
@@ -474,6 +559,12 @@ cmd_status() {
   fi
 
   log "livestream extensions"; check_livestream_versions
+  log "AI agent"
+  if agent_enabled; then
+    agent_health && info "ready on $AGENT_PORT/TCP" || warn "not ready; check $KIT_LOG"
+  else
+    info "disabled (NVIDIA_API_KEY was not provisioned)"
+  fi
   if [ "$ready" = "yes" ]; then log "booth URL"; info "$(booth_url "$cur")"; fi
   diagnose || true
 }
@@ -494,7 +585,7 @@ cmd_check_ports() {
   local ip secs="${1:-30}"
   ip="$(detect_public_ip || echo '<ip>')"
   log "local listeners"
-  for p in "$WEB_PORT" "$SIGNAL_PORT" "$MEDIA_PORT"; do
+  for p in "$WEB_PORT" "$SIGNAL_PORT" "$MEDIA_PORT" "$AGENT_PORT"; do
     if ss -tuln 2>/dev/null | grep -q ":$p "; then info "port $p: listening"; else info "port $p: not listening"; fi
   done
   info "($MEDIA_PORT stays 'not listening' until a client connects — that is normal.)"
@@ -547,7 +638,22 @@ case "${CMD:-start}" in
   check-ports)    cmd_check_ports "${ARGS[0]:-30}" ;;
   wait)           session_up "$KIT_SESSION" || die "no $KIT_SESSION session running — use '$0 start'."
                   rc=0; wait_ready "$READY_TIMEOUT" || rc=$?
+                  if [ "$rc" -eq 0 ]; then
+                    repair_rc=0
+                    repair_agent_dependency || repair_rc=$?
+                    if [ "$repair_rc" -eq 0 ]; then
+                      pub_ip="$(detect_public_ip)" || die "could not determine public IP for the agent repair restart"
+                      start_kit "$pub_ip"
+                      wait_ready "$READY_TIMEOUT" || rc=$?
+                    elif [ "$repair_rc" -eq 2 ]; then
+                      rc=1
+                    fi
+                  fi
+                  check_livestream_versions
                   diagnose || true
+                  if [ "$rc" -eq 0 ]; then
+                    wait_agent_ready || rc=1
+                  fi
                   if [ "$rc" -ne 0 ]; then tail -n 30 "$KIT_LOG" | sed 's/^/     /'; exit 1; fi
                   log "booth URL"; info "$(booth_url)" ;;
   url)            booth_url ;;

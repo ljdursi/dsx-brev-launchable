@@ -33,8 +33,8 @@
 #                             script sees both ends.
 #            -- <args>        escape hatch: replaces ALL generated `brev create` args
 #
-#   ⚠️ ONE MANUAL STEP — THE BREV FIREWALL. Open 8081/TCP, 49100/TCP and
-#      47998/TCP+UDP for the instance in the Brev dashboard. No brev CLI command
+#   ⚠️ ONE MANUAL STEP — THE BREV FIREWALL. Open 8081/TCP, 49100/TCP,
+#      47998/TCP+UDP and 8012/TCP for the instance. No brev CLI command
 #      edits firewall rules. This script prints the list, with the instance's
 #      public IP, AS SOON AS PROVISIONING STARTS — so you can do it during the
 #      30-45 min build instead of discovering it at the end.
@@ -111,10 +111,11 @@ LIST_TYPES=0
 
 # Must match dsx-setup.sh and dsx-run.sh. On this path they are opened BY HAND in
 # the Brev dashboard (the banner below prints them as soon as provisioning starts);
-# a Brev Launchable declares the same three ports in its own definition instead.
+# a Brev Launchable declares the same four ports in its own definition instead.
 WEB_PORT=8081
 SIGNAL_PORT=49100
 MEDIA_PORT=47998
+AGENT_PORT=8012
 
 log()  { printf '\n==> %s\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
@@ -222,13 +223,17 @@ if [ "$CHECK_PORTS" -eq 1 ]; then
     || die "could not start the capture on $NAME"
 
   log "probing from here (this machine is outside the instance's firewall)"
-  for p in "$WEB_PORT" "$SIGNAL_PORT" "$MEDIA_PORT"; do
+  for p in "$WEB_PORT" "$SIGNAL_PORT" "$MEDIA_PORT" "$AGENT_PORT"; do
     if timeout 8 bash -c "echo > /dev/tcp/$IP/$p" 2>/dev/null; then
       info "$p/TCP  OPEN — and something is listening"
     elif [ $? -eq 124 ]; then
       warn "$p/TCP  BLOCKED (timed out) — add it in the Brev dashboard"
     else
-      info "$p/TCP  OPEN — nothing bound (normal: Kit binds $MEDIA_PORT as UDP only)"
+      if [ "$p" = "$MEDIA_PORT" ]; then
+        info "$p/TCP  OPEN — nothing bound (normal: Kit binds this as UDP only)"
+      else
+        info "$p/TCP  OPEN — nothing bound"
+      fi
     fi
   done
   for i in $(seq 1 12); do printf 'dsx-portcheck' > "/dev/udp/$IP/$MEDIA_PORT" 2>/dev/null || true; done
@@ -313,7 +318,7 @@ If the SECOND list is empty, DSX streaming cannot work on what you can allocate 
 this org — raise it before booking booth time.
 
 Note: creating an instance WITH a configurable firewall does not OPEN anything.
-Once it is up you must add $WEB_PORT/TCP, $SIGNAL_PORT/TCP and $MEDIA_PORT/TCP+UDP by hand in
+Once it is up you must add $WEB_PORT/TCP, $SIGNAL_PORT/TCP, $MEDIA_PORT/TCP+UDP and $AGENT_PORT/TCP by hand in
 the Brev dashboard — a real run prints the list as soon as provisioning starts.
 
 Instance types this script will try, in order: $INSTANCE_TYPES
@@ -500,6 +505,7 @@ ports_banner() {
       $WEB_PORT    web UI      TCP
       $SIGNAL_PORT   signaling   TCP
       $MEDIA_PORT   media       TCP *and* UDP   <-- UDP carries the video
+      $AGENT_PORT    AI agent    TCP
 
   Instance public IP : $host
   Booth URL will be  : http://$host:$WEB_PORT/?server=$host&signalingPort=$SIGNAL_PORT
@@ -569,7 +575,7 @@ fi
 # launch
 # ---------------------------------------------------------------------------
 log "launching the demo"
-warn "LAST CALL on the firewall — $WEB_PORT/TCP, $SIGNAL_PORT/TCP and $MEDIA_PORT/TCP+UDP must be"
+warn "LAST CALL on the firewall — $WEB_PORT/TCP, $SIGNAL_PORT/TCP, $MEDIA_PORT/TCP+UDP and $AGENT_PORT/TCP must be"
 warn "exposed for '$NAME' in the Brev dashboard (the banner printed when provisioning"
 warn "started has the details). No brev CLI command opens it. Without $MEDIA_PORT/UDP the"
 warn "page loads, the viewport stays black, and Kit logs 'Got stop event while"

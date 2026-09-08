@@ -46,6 +46,7 @@ WEB_PORT=8081
 SIGNAL_PORT=49100
 MEDIA_PORT=47998
 AGENT_PORT=8012
+AGENT_MODEL="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
 
 log()  { printf '\n== %s\n' "$*"; }
 info() { printf '   %s\n' "$*"; }
@@ -139,6 +140,18 @@ patch_built_kit() {
   return 0
 }
 
+patch_agent_model() {
+  local workflow n=0
+  while IFS= read -r workflow; do
+    [ -f "$workflow" ] || continue
+    grep -qF "model_name: $AGENT_MODEL" "$workflow" && continue
+    sed -i -E "s|^([[:space:]]*model_name:[[:space:]]*).*|\1$AGENT_MODEL|" "$workflow"
+    n=$((n+1))
+  done < <(find "$DSX_WORKDIR/source/extensions/omni.ai.aiq.dsx" "$DSX_WORKDIR/_build" \
+    -path '*/omni.ai.aiq.dsx/data/workflow.yaml' -print 2>/dev/null || true)
+  [ "$n" -eq 0 ] || info "AI agent model set to $AGENT_MODEL in $n workflow file(s)"
+}
+
 # ---------------------------------------------------------------------------
 # process control
 # ---------------------------------------------------------------------------
@@ -155,6 +168,7 @@ start_kit() {
   local pub_ip="$1"
   kill_session "$KIT_SESSION"
   patch_built_kit
+  patch_agent_model
   # Truncate: otherwise the readiness check matches the PREVIOUS run's ready line
   # and reports success against a server that never came up.
   : > "$KIT_LOG"
@@ -290,17 +304,17 @@ wait_ready() {
   done
 }
 
-# The agent dependency bundle is created by run_streaming.sh's first build, so
-# the compatibility repair cannot run during provisioning. Apply it only after
-# the exact PEP 728/typing_extensions failure has been observed, then let the
-# caller restart Kit once. A clean rebuild removes both the repair and marker.
+# The agent dependency bundles are created by run_streaming.sh's first build,
+# so compatibility repairs cannot run during provisioning. Any one of the known
+# errors proves the affected bundle layout is present; install the complete
+# tested set, then let the caller restart Kit only once.
 agent_enabled() { [ -n "${NVIDIA_API_KEY:-}" ]; }
 
-agent_typing_target() {
+agent_early_pip_target() {
   local target
 
   # Kit loads omni.kit.pip_archive before the AI extensions, so its cached
-  # typing_extensions must be repaired first. Packman exposes it as a symlink.
+  # packages must be repaired first. Packman exposes it as a symlink.
   target="$(find "$DSX_WORKDIR/_build" \( -type d -o -type l \) \
     -path '*/release/extscache/omni.kit.pip_archive-*' -print -quit 2>/dev/null || true)"
   if [ -n "$target" ] && [ -d "$target/pip_prebundle" ]; then
@@ -313,34 +327,49 @@ agent_typing_target() {
     -print -quit 2>/dev/null || true
 }
 
-repair_agent_dependency() {
-  local target marker
+agent_nat_pip_target() {
+  find "$DSX_WORKDIR/_build" \( -type d -o -type l \) \
+    -path '*/release/exts/omni.ai.langchain.nat/pip_nat_prebundle' \
+    -print -quit 2>/dev/null || true
+}
+
+repair_agent_dependencies() {
+  local early_target nat_target marker python
   agent_enabled || return 1
-  grep -qi 'extra_items' "$KIT_LOG" 2>/dev/null || return 1
+  grep -qiE 'extra_items|No module named.*tqdm|cannot import name.*backoff.*websockets\.client' \
+    "$KIT_LOG" 2>/dev/null || return 1
 
-  target="$(agent_typing_target)"
-  if [ -z "$target" ]; then
-    warn "AI agent hit the typing_extensions error, but no repair target was found."
+  early_target="$(agent_early_pip_target)"
+  nat_target="$(agent_nat_pip_target)"
+  if [ -z "$early_target" ] || [ -z "$nat_target" ]; then
+    warn "AI agent hit a bundled dependency error, but no repair target was found."
     return 2
   fi
-  marker="$target/.dsx-typing-extensions-4.16.0"
+  marker="$early_target/.dsx-agent-dependencies-v2"
   if [ -f "$marker" ]; then
-    warn "AI agent still reports extra_items even though the dependency repair is marked installed."
+    warn "AI agent still reports a dependency error after the bundled repair."
+    return 2
+  fi
+  python="$DSX_WORKDIR/tools/packman/python.sh"
+  if [ ! -x "$python" ]; then
+    warn "blueprint Python wrapper not found at $python"
     return 2
   fi
 
-  log "repairing Kit typing_extensions dependency"
-  if ! python3 -m pip install --disable-pip-version-check --no-cache-dir \
-      --upgrade --target "$target" 'typing_extensions==4.16.0'; then
-    python3 -m pip install --disable-pip-version-check --no-cache-dir \
-      --break-system-packages --upgrade --target "$target" \
-      'typing_extensions==4.16.0' || {
-        warn "could not install typing_extensions==4.16.0 into $target"
-        return 2
-      }
-  fi
+  log "repairing bundled AI-agent dependencies"
+  "$python" -m pip install --disable-pip-version-check --no-cache-dir \
+    --upgrade --target "$early_target" \
+    'typing_extensions==4.16.0' 'websockets==16.0' || {
+      warn "could not repair typing_extensions/websockets in $early_target"
+      return 2
+    }
+  "$python" -m pip install --disable-pip-version-check --no-cache-dir \
+    --upgrade --target "$nat_target" 'tqdm==4.67.1' || {
+      warn "could not install tqdm==4.67.1 into $nat_target"
+      return 2
+    }
   touch "$marker"
-  info "agent dependency repaired; Kit must restart once"
+  info "agent dependencies repaired; Kit must restart once"
   return 0
 }
 
@@ -351,6 +380,24 @@ agent_health() {
     [[ "$body" =~ \"api_key_set\"[[:space:]]*:[[:space:]]*true ]]
 }
 
+agent_registration_ready() {
+  grep -qF 'NAT LLM and plugin registrations loaded' "$KIT_LOG" 2>/dev/null
+}
+
+agent_smoke_test() {
+  local body
+  body="$(curl -fsS -m 60 -H 'Content-Type: application/json' \
+    --data '{"message":"Reply with OK only. Do not change the scene.","user_id":"launchable-startup-check","history":[]}' \
+    "http://127.0.0.1:$AGENT_PORT/api/agent/chat" 2>/dev/null || true)"
+  if [[ "$body" =~ \"response\" ]] &&
+     [[ "$body" != *"An error occurred while processing your request"* ]]; then
+    return 0
+  fi
+  warn "AI agent HTTP server is up, but its NIM smoke test failed:"
+  warn "  ${body:-<no response>}"
+  return 1
+}
+
 wait_agent_ready() {
   local i
   if ! agent_enabled; then
@@ -358,13 +405,14 @@ wait_agent_ready() {
     return 0
   fi
   for i in $(seq 1 30); do
-    if agent_health; then
-      info "AI agent: ready on $AGENT_PORT/TCP"
+    if agent_health && agent_registration_ready; then
+      agent_smoke_test || return 1
+      info "AI agent: ready on $AGENT_PORT/TCP (NIM smoke test passed)"
       return 0
     fi
     sleep 2
   done
-  warn "AI agent did not report agent_available=true at http://127.0.0.1:$AGENT_PORT/api/agent/health"
+  warn "AI agent did not load its NIM registrations at http://127.0.0.1:$AGENT_PORT"
   return 1
 }
 
@@ -397,8 +445,8 @@ diagnose() {
     warn "  Use separate instances for concurrent practice; spectatorStream is an"
     warn "  untested option for additional viewers (see runbook)."
     hit=1; }
-  grep -qi 'extra_items' "$KIT_LOG" 2>/dev/null && {
-    warn "AI agent dependency error: bundled typing_extensions lacks PEP 728 support."
+  grep -qiE 'extra_items|No module named.*tqdm|cannot import name.*backoff.*websockets\.client' "$KIT_LOG" 2>/dev/null && {
+    warn "AI agent dependency error: incompatible typing_extensions/tqdm/websockets bundles."
     warn "  Restart with '$0 kit'; startup repairs this automatically after the first build."
     hit=1; }
   return $hit
@@ -474,7 +522,7 @@ cmd_start() {
   wait_ready "$READY_TIMEOUT" || rc=$?
   if [ "$rc" -eq 0 ]; then
     repair_rc=0
-    repair_agent_dependency || repair_rc=$?
+    repair_agent_dependencies || repair_rc=$?
     if [ "$repair_rc" -eq 0 ]; then
       start_kit "$pub_ip"
       wait_ready "$READY_TIMEOUT" || rc=$?
@@ -572,7 +620,8 @@ cmd_status() {
   log "livestream extensions"; check_livestream_versions
   log "AI agent"
   if agent_enabled; then
-    agent_health && info "ready on $AGENT_PORT/TCP" || warn "not ready; check $KIT_LOG"
+    agent_health && agent_registration_ready &&
+      info "ready on $AGENT_PORT/TCP" || warn "not ready; check $KIT_LOG"
   else
     info "disabled (NVIDIA_API_KEY was not provisioned)"
   fi
@@ -651,7 +700,7 @@ case "${CMD:-start}" in
                   rc=0; wait_ready "$READY_TIMEOUT" || rc=$?
                   if [ "$rc" -eq 0 ]; then
                     repair_rc=0
-                    repair_agent_dependency || repair_rc=$?
+                    repair_agent_dependencies || repair_rc=$?
                     if [ "$repair_rc" -eq 0 ]; then
                       pub_ip="$(detect_public_ip)" || die "could not determine public IP for the agent repair restart"
                       start_kit "$pub_ip"

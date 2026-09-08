@@ -228,8 +228,21 @@ info "public IP: $PUB_IP"
 KIT_LOG="$APP_HOME/dsx-kit.log"
 WEB_LOG="$APP_HOME/dsx-web.log"
 AGENT_PORT=8012
+AGENT_MODEL="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+
+patch_agent_model() {
+  local workflow
+  while IFS= read -r workflow; do
+    [ -f "$workflow" ] || continue
+    grep -qF "model_name: $AGENT_MODEL" "$workflow" && continue
+    $SUDO -u "$APP_USER" sed -i -E \
+      "s|^([[:space:]]*model_name:[[:space:]]*).*|\\1$AGENT_MODEL|" "$workflow"
+  done < <(find "$WORKDIR/source/extensions/omni.ai.aiq.dsx" "$WORKDIR/_build" \
+    -path '*/omni.ai.aiq.dsx/data/workflow.yaml' -print 2>/dev/null || true)
+}
 
 start_kit() {
+  patch_agent_model
   $SUDO -u "$APP_USER" bash -c "cd '$WORKDIR' && \
     tmux kill-session -t dsx-kit 2>/dev/null; : > '$KIT_LOG'; \
     tmux new-session -d -s dsx-kit \
@@ -247,34 +260,54 @@ wait_renderer() {
   done
 }
 
-repair_agent_dependency() {
+agent_early_pip_target() {
   local target
 
   # Kit loads omni.kit.pip_archive before the AI extensions, so its cached
-  # typing_extensions must be repaired first. Packman exposes it as a symlink.
+  # packages must be repaired first. Packman exposes it as a symlink.
   target="$(find "$WORKDIR/_build" \( -type d -o -type l \) \
     -path '*/release/extscache/omni.kit.pip_archive-*' -print -quit 2>/dev/null || true)"
   if [ -n "$target" ] && [ -d "$target/pip_prebundle" ]; then
-    target="$target/pip_prebundle"
+    printf '%s\n' "$target/pip_prebundle"
+    return
   else
-    target="$(find "$WORKDIR/_build" \( -type d -o -type l \) \
+    find "$WORKDIR/_build" \( -type d -o -type l \) \
       -path '*/release/exts/omni.ai.langchain.core/pip_core_prebundle' \
-      -print -quit 2>/dev/null || true)"
+      -print -quit 2>/dev/null || true
   fi
-  if [ -z "$target" ]; then
-    warn "AI agent hit the typing_extensions error, but no repair target was found"
+}
+
+agent_nat_pip_target() {
+  find "$WORKDIR/_build" \( -type d -o -type l \) \
+    -path '*/release/exts/omni.ai.langchain.nat/pip_nat_prebundle' \
+    -print -quit 2>/dev/null || true
+}
+
+repair_agent_dependencies() {
+  local early_target nat_target python marker
+  early_target="$(agent_early_pip_target)"
+  nat_target="$(agent_nat_pip_target)"
+  if [ -z "$early_target" ] || [ -z "$nat_target" ]; then
+    warn "AI agent hit a bundled dependency error, but no repair target was found"
     return 1
   fi
-
-  log "repairing Kit typing_extensions dependency"
-  if ! $SUDO -u "$APP_USER" python3 -m pip install \
-      --disable-pip-version-check --no-cache-dir --upgrade --target "$target" \
-      'typing_extensions==4.16.0'; then
-    $SUDO -u "$APP_USER" python3 -m pip install \
-      --disable-pip-version-check --no-cache-dir --break-system-packages \
-      --upgrade --target "$target" 'typing_extensions==4.16.0' || return 1
+  marker="$early_target/.dsx-agent-dependencies-v2"
+  if [ -f "$marker" ]; then
+    warn "AI agent still reports a dependency error after the bundled repair"
+    return 1
   fi
-  info "agent dependency repaired; restarting Kit once"
+  python="$WORKDIR/tools/packman/python.sh"
+  [ -x "$python" ] || python=python3
+
+  log "repairing bundled AI-agent dependencies"
+  $SUDO -u "$APP_USER" "$python" -m pip install \
+    --disable-pip-version-check --no-cache-dir --upgrade --target "$early_target" \
+    'typing_extensions==4.16.0' 'websockets==16.0' || return 1
+  $SUDO -u "$APP_USER" "$python" -m pip install \
+    --disable-pip-version-check --no-cache-dir --upgrade --target "$nat_target" \
+    'tqdm==4.67.1' || return 1
+  $SUDO -u "$APP_USER" touch "$marker"
+  info "agent dependencies repaired; restarting Kit once"
 }
 
 $SUDO -u "$APP_USER" bash -c "tmux kill-session -t dsx-web 2>/dev/null; true"
@@ -294,11 +327,12 @@ log "[6/6] waiting for the renderer"
 # "app ready" (~25s) is NOT readiness: the scene is still loading.
 wait_renderer
 
-# The prebundle does not exist until run_streaming.sh completes its first build.
-# Repair only the observed PEP 728 failure, then restart Kit so its Python
-# modules are imported from the repaired bundle.
-if [ -n "${NVIDIA_API_KEY:-}" ] && grep -qi 'extra_items' "$KIT_LOG" 2>/dev/null; then
-  if repair_agent_dependency; then
+# The prebundles do not exist until run_streaming.sh completes its first build.
+# Any one of these errors proves the affected dependency layout is present, so
+# install the complete tested set and restart only once.
+if [ -n "${NVIDIA_API_KEY:-}" ] &&
+   grep -qiE 'extra_items|No module named.*tqdm|cannot import name.*backoff.*websockets\.client' "$KIT_LOG" 2>/dev/null; then
+  if repair_agent_dependencies; then
     start_kit
     wait_renderer
   else
@@ -312,16 +346,27 @@ if [ -n "${NVIDIA_API_KEY:-}" ]; then
     AGENT_HEALTH="$(curl -fsS -m 3 \
       "http://127.0.0.1:$AGENT_PORT/api/agent/health" 2>/dev/null || true)"
     if [[ "$AGENT_HEALTH" =~ \"agent_available\"[[:space:]]*:[[:space:]]*true ]] &&
-       [[ "$AGENT_HEALTH" =~ \"api_key_set\"[[:space:]]*:[[:space:]]*true ]]; then
+       [[ "$AGENT_HEALTH" =~ \"api_key_set\"[[:space:]]*:[[:space:]]*true ]] &&
+       grep -qF 'NAT LLM and plugin registrations loaded' "$KIT_LOG" 2>/dev/null; then
       AGENT_READY=1
       break
     fi
     sleep 2
   done
   if [ "$AGENT_READY" -eq 1 ]; then
-    info "AI agent ready on $AGENT_PORT/TCP"
+    AGENT_SMOKE="$(curl -fsS -m 60 -H 'Content-Type: application/json' \
+      --data '{"message":"Reply with OK only. Do not change the scene.","user_id":"launchable-startup-check","history":[]}' \
+      "http://127.0.0.1:$AGENT_PORT/api/agent/chat" 2>/dev/null || true)"
+    if [[ "$AGENT_SMOKE" =~ \"response\" ]] &&
+       [[ "$AGENT_SMOKE" != *"An error occurred while processing your request"* ]]; then
+      info "AI agent ready on $AGENT_PORT/TCP (NIM smoke test passed)"
+    else
+      AGENT_READY=0
+      warn "AI agent HTTP server is up, but its NIM smoke test failed"
+      warn "  ${AGENT_SMOKE:-<no response>}"
+    fi
   else
-    warn "AI agent did not report agent_available=true on $AGENT_PORT/TCP"
+    warn "AI agent did not load its NIM registrations on $AGENT_PORT/TCP"
   fi
 else
   info "AI agent disabled (NVIDIA_API_KEY launch parameter was not supplied)"

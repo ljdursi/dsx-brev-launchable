@@ -142,7 +142,7 @@ Full history, gotchas and evidence: `background/ai-factory-demo-setup-runbook.md
 ## 8. AI agent
 
 The agent is enabled whenever the `NVIDIA_API_KEY` launch parameter is supplied.
-The viewer remains usable without it. The Launchable handles the three required
+The viewer remains usable without it. The Launchable handles the four required
 pieces:
 
 1. **`NVIDIA_API_KEY` launch parameter.** Optional, no default; get a key from
@@ -156,17 +156,27 @@ pieces:
    `GET http://<ip>:8012/api/agent/preferences/local-user net::ERR_CONNECTION_TIMED_OUT`
    and `[ConfiguratorPanel] Failed to load GPU preference`.
 
-3. **Post-build dependency repair.** On affected builds, all four `omni.ai.*`
-   extensions fail to import with
-   `TypeError: _TypedDictMeta.__new__() got an unexpected keyword argument 'extra_items'`,
-   caused by the bundled `typing_extensions`. The early-loaded
-   `omni.kit.pip_archive` wins in Python's module cache, and Packman exposes it
-   through a symlink that only exists after `run_streaming.sh` performs its
-   first build. The setup therefore waits for the renderer, detects this exact
-   error, installs the tested `typing_extensions==4.16.0` into that prebundle
-   (falling back to the agent core prebundle on layouts without the archive),
-   and restarts Kit once. Builds without the error are left unchanged.
+3. **A live NIM model.** The upstream workflow's
+   `mistralai/mistral-large-3-675b-instruct-2512` model was retired on
+   2026-07-23 and now returns HTTP 410. Each launch idempotently patches both
+   source and built workflow files to
+   `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning`,
+   which was verified against the configured NVIDIA account on 2026-09-08.
 
-After startup, the script checks `GET /api/agent/health` and only reports the
-configured agent ready when both `api_key_set` and `agent_available` are true.
-The laptop-side `--check-ports` path also probes 8012/TCP.
+4. **Post-build dependency repair.** The affected build has three cascading
+   bundle problems: an old `typing_extensions` rejects PEP 728's
+   `extra_items`; NAT omits `tqdm`; and Kit's early `websockets==12.0`
+   shadows NAT's required version and lacks `websockets.client.backoff`.
+   Because these prebundles only exist after the first build, setup waits for
+   the renderer, detects any of the known errors, and installs the complete
+   tested set: `typing_extensions==4.16.0` and `websockets==16.0` in the
+   early Kit pip archive, plus `tqdm==4.67.1` in NAT's prebundle. It uses the
+   blueprint's Packman Python 3.12 wrapper so binary wheels match Kit, then
+   restarts Kit once. The Ubuntu `devscripts` version warning printed by pip is
+   unrelated.
+
+After startup, the script requires all of the following before reporting the
+agent ready: `GET /api/agent/health` has `api_key_set` and
+`agent_available`, the log confirms NAT LLM/plugin registration, and a small
+real `POST /api/agent/chat` NIM request succeeds. The laptop-side
+`--check-ports` path also probes 8012/TCP.

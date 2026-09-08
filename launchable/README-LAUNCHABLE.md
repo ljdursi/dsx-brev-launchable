@@ -159,11 +159,13 @@ pieces:
 3. **Post-build dependency repair.** On affected builds, all four `omni.ai.*`
    extensions fail to import with
    `TypeError: _TypedDictMeta.__new__() got an unexpected keyword argument 'extra_items'`,
-   caused by the bundled `typing_extensions`. That target directory only exists
-   after `run_streaming.sh` performs its first build. The setup therefore waits
-   for the renderer, detects this exact error, installs the tested
-   `typing_extensions==4.13.2` into the prebundle, and restarts Kit once. Builds
-   without the error are left unchanged.
+   caused by the bundled `typing_extensions`. The early-loaded
+   `omni.kit.pip_archive` wins in Python's module cache, and Packman exposes it
+   through a symlink that only exists after `run_streaming.sh` performs its
+   first build. The setup therefore waits for the renderer, detects this exact
+   error, installs the tested `typing_extensions==4.16.0` into that prebundle
+   (falling back to the agent core prebundle on layouts without the archive),
+   and restarts Kit once. Builds without the error are left unchanged.
 
 After startup, the script checks `GET /api/agent/health` and only reports the
 configured agent ready when both `api_key_set` and `agent_available` are true.

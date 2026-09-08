@@ -296,9 +296,20 @@ wait_ready() {
 # caller restart Kit once. A clean rebuild removes both the repair and marker.
 agent_enabled() { [ -n "${NVIDIA_API_KEY:-}" ]; }
 
-agent_prebundle_dir() {
-  find "$DSX_WORKDIR/_build" -type d \
-    -path '*/exts/omni.ai.langchain.core/pip_core_prebundle' \
+agent_typing_target() {
+  local target
+
+  # Kit loads omni.kit.pip_archive before the AI extensions, so its cached
+  # typing_extensions must be repaired first. Packman exposes it as a symlink.
+  target="$(find "$DSX_WORKDIR/_build" \( -type d -o -type l \) \
+    -path '*/release/extscache/omni.kit.pip_archive-*' -print -quit 2>/dev/null || true)"
+  if [ -n "$target" ] && [ -d "$target/pip_prebundle" ]; then
+    printf '%s\n' "$target/pip_prebundle"
+    return
+  fi
+
+  find "$DSX_WORKDIR/_build" \( -type d -o -type l \) \
+    -path '*/release/exts/omni.ai.langchain.core/pip_core_prebundle' \
     -print -quit 2>/dev/null || true
 }
 
@@ -307,24 +318,24 @@ repair_agent_dependency() {
   agent_enabled || return 1
   grep -qi 'extra_items' "$KIT_LOG" 2>/dev/null || return 1
 
-  target="$(agent_prebundle_dir)"
+  target="$(agent_typing_target)"
   if [ -z "$target" ]; then
-    warn "AI agent hit the typing_extensions error, but its prebundle was not found."
+    warn "AI agent hit the typing_extensions error, but no repair target was found."
     return 2
   fi
-  marker="$target/.dsx-typing-extensions-4.13.2"
+  marker="$target/.dsx-typing-extensions-4.16.0"
   if [ -f "$marker" ]; then
     warn "AI agent still reports extra_items even though the dependency repair is marked installed."
     return 2
   fi
 
-  log "repairing AI agent typing_extensions dependency"
+  log "repairing Kit typing_extensions dependency"
   if ! python3 -m pip install --disable-pip-version-check --no-cache-dir \
-      --upgrade --target "$target" 'typing_extensions==4.13.2'; then
+      --upgrade --target "$target" 'typing_extensions==4.16.0'; then
     python3 -m pip install --disable-pip-version-check --no-cache-dir \
       --break-system-packages --upgrade --target "$target" \
-      'typing_extensions==4.13.2' || {
-        warn "could not install typing_extensions==4.13.2 into $target"
+      'typing_extensions==4.16.0' || {
+        warn "could not install typing_extensions==4.16.0 into $target"
         return 2
       }
   fi

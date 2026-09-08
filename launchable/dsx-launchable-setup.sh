@@ -249,21 +249,30 @@ wait_renderer() {
 
 repair_agent_dependency() {
   local target
-  target="$(find "$WORKDIR/_build" -type d \
-    -path '*/exts/omni.ai.langchain.core/pip_core_prebundle' \
-    -print -quit 2>/dev/null || true)"
+
+  # Kit loads omni.kit.pip_archive before the AI extensions, so its cached
+  # typing_extensions must be repaired first. Packman exposes it as a symlink.
+  target="$(find "$WORKDIR/_build" \( -type d -o -type l \) \
+    -path '*/release/extscache/omni.kit.pip_archive-*' -print -quit 2>/dev/null || true)"
+  if [ -n "$target" ] && [ -d "$target/pip_prebundle" ]; then
+    target="$target/pip_prebundle"
+  else
+    target="$(find "$WORKDIR/_build" \( -type d -o -type l \) \
+      -path '*/release/exts/omni.ai.langchain.core/pip_core_prebundle' \
+      -print -quit 2>/dev/null || true)"
+  fi
   if [ -z "$target" ]; then
-    warn "AI agent hit the typing_extensions error, but its prebundle was not found"
+    warn "AI agent hit the typing_extensions error, but no repair target was found"
     return 1
   fi
 
-  log "repairing AI agent typing_extensions dependency"
+  log "repairing Kit typing_extensions dependency"
   if ! $SUDO -u "$APP_USER" python3 -m pip install \
       --disable-pip-version-check --no-cache-dir --upgrade --target "$target" \
-      'typing_extensions==4.13.2'; then
+      'typing_extensions==4.16.0'; then
     $SUDO -u "$APP_USER" python3 -m pip install \
       --disable-pip-version-check --no-cache-dir --break-system-packages \
-      --upgrade --target "$target" 'typing_extensions==4.13.2' || return 1
+      --upgrade --target "$target" 'typing_extensions==4.16.0' || return 1
   fi
   info "agent dependency repaired; restarting Kit once"
 }

@@ -12,6 +12,8 @@
 #                     organization secret -- never a parameter default.
 #     NVIDIA_API_KEY  optional. AI-agent extension only; the 3D viewer,
 #                     camera controls and configurator all work without it.
+#     DSX_INSTANCE_NAME optional. Brev display name used only in the printed
+#                     post-resume command. Falls back to Brev's stable env ID.
 #
 #   PORTS the Launchable must declare (see README-LAUNCHABLE.md):
 #     8081/TCP  web UI      49100/TCP  signalling      47998/TCP+UDP  media
@@ -49,6 +51,9 @@ info "app user: $APP_USER ($APP_HOME)"
 REPO_URL="https://github.com/NVIDIA-Omniverse-blueprints/omniverse-dsx-blueprint-for-ai-factories.git"
 WORKDIR="$APP_HOME/omniverse-dsx-blueprint-for-ai-factories"
 CONTENT_PACK="nvidia/omniverse/dsx_dataset:2.1"
+RUNTIME_SCRIPT_URL="https://raw.githubusercontent.com/ljdursi/dsx-brev-launchable/v1/scripts/dsx-run.sh"
+STATE_DIR="$APP_HOME/.dsx"
+RESTART_TARGET="${DSX_INSTANCE_NAME:-${BREV_ENV_ID:-<instance-name>}}"
 
 # ---------------------------------------------------------------------------
 log "[1/6] system dependencies"
@@ -198,6 +203,27 @@ if [ -n "${NVIDIA_API_KEY:-}" ]; then
   $SUDO -u "$APP_USER" bash -c "umask 077; printf 'export NVIDIA_API_KEY=%s\n' '$NVIDIA_API_KEY' > '$APP_HOME/.dsx-agent-env'"
   info "NVIDIA_API_KEY stored for the AI-agent extension"
 fi
+
+# Brev does not rerun a Launchable setup script after a stopped VM resumes.
+# Persist the existing runtime-only helper and the state it expects so the
+# operator can redetect the public IP and restart both services with one command.
+curl -fsSL "$RUNTIME_SCRIPT_URL" -o /tmp/dsx-run.sh \
+  || die "could not download the persistent DSX restart helper"
+$SUDO install -o "$APP_USER" -g "$(id -gn "$APP_USER")" -m 0755 \
+  /tmp/dsx-run.sh "$APP_HOME/dsx-run.sh"
+$SUDO mkdir -p "$STATE_DIR"
+$SUDO tee "$STATE_DIR/config" >/dev/null <<STATE
+# written by dsx-launchable-setup.sh on $(date -Is)
+DSX_WORKDIR="$WORKDIR"
+DSX_DATA_DIR="$DATA_DIR"
+DSX_DOWNLOAD_DIR="$DATA_DIR"
+DSX_SCENE="$SCENE"
+STATE
+$SUDO chown -R "$APP_USER:$(id -gn "$APP_USER")" "$STATE_DIR"
+if [ -f "$APP_HOME/.dsx-agent-env" ]; then
+  $SUDO -u "$APP_USER" ln -sf "$APP_HOME/.dsx-agent-env" "$STATE_DIR/env"
+fi
+info "persistent restart helper: $APP_HOME/dsx-run.sh"
 
 # ---------------------------------------------------------------------------
 log "[5/6] launch"
@@ -405,7 +431,9 @@ $( case "$LS_VERS" in
      and keep the URL off shared channels.
 
   Logs:  $KIT_LOG   $WEB_LOG
-  Restart kit:  sudo -u $APP_USER tmux kill-session -t dsx-kit; then re-run this script
+
+  After a VM stop/start, restart DSX with:
+    brev exec $RESTART_TARGET 'bash $APP_HOME/dsx-run.sh start'
 ============================================================
 BANNER
 [ "$READY" -eq 1 ] || exit 1

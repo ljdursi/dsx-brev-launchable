@@ -63,6 +63,7 @@ blocks until the renderer reports ready and prints the URL.
 |---|---|---|
 | `NGC_API_KEY` | **yes** | **Define with NO DEFAULT** and back it with an **organization secret** (one already exists in the target org). NVIDIA's own guidance: do not store reusable credentials as parameter defaults. ⚠️ The parameter must be named **exactly** `NGC_API_KEY` — Brev passes parameters in as env vars of the same name, and the script fails fast if it is absent. The script writes it to `~/.ngc/config` (mode 0600) and **keeps it**, so a stop/start that wipes an instance-store content pack can re-download without a re-deploy. That is a deliberate call: it is a read-only key on a VM that is stopped when idle and revoked after the conference. `DSX_SHRED_NGC_CONFIG=1` removes it after the download if you prefer. **The risk being managed is a key in a searchable public repo** — hence the org secret, and hence no credential in any version-controlled file. |
 | `NVIDIA_API_KEY` | no | AI-agent extension only. The viewer, camera and configurator all work without it. |
+| `DSX_INSTANCE_NAME` | no | Optional Brev display name used only in the printed stop/start recovery command. If omitted, the script uses Brev's stable `BREV_ENV_ID`, which `brev exec` accepts directly. |
 
 ## 4. Ports
 
@@ -139,7 +140,24 @@ booth, and `dsx-run.sh` is still the right tool for restarting a running demo.
 
 Full history, gotchas and evidence: `background/ai-factory-demo-setup-runbook.md`.
 
-## 8. AI agent
+## 8. Restarting after a VM stop/start
+
+Brev resumes the VM but does not rerun a Launchable's setup script. Setup now
+installs the persistent runtime helper at `/home/ubuntu/dsx-run.sh` and saves its
+configuration under `/home/ubuntu/.dsx/`. After resuming the VM, run:
+
+```bash
+brev exec <instance-name-or-environment-id> \
+  'bash /home/ubuntu/dsx-run.sh start'
+```
+
+The helper redetects the VM's current public IP, updates the streaming settings,
+and starts Kit, the web UI, and the AI agent. The final Launchable log prints a
+fully resolved copy-and-paste command immediately after the connection URL. Set
+the optional `DSX_INSTANCE_NAME` launch parameter if that command should show the
+human-readable instance name; otherwise it uses `BREV_ENV_ID`.
+
+## 9. AI agent
 
 The agent is enabled whenever the `NVIDIA_API_KEY` launch parameter is supplied.
 The viewer remains usable without it. The Launchable handles the four required

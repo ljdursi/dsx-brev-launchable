@@ -68,6 +68,11 @@ Each of these is a real failure we hit, and each is silent or misleading:
    model. The dashboard can. Identical invocations landed in Tokyo and Ohio on
    consecutive days, which is the difference between a responsive demo and a
    broken-feeling one.
+10. **A Brev stop/start does not rerun the Launchable setup script.** The
+    Launchable installs `/home/ubuntu/dsx-run.sh`, which redetects the changed
+    public IP and restarts DSX. Copy the exact `brev exec ...` command printed at
+    the end of the setup log and run it after resuming the VM.
+
 
 ## Ports
 

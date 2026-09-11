@@ -196,5 +196,7 @@ pieces:
 After startup, the script requires all of the following before reporting the
 agent ready: `GET /api/agent/health` has `api_key_set` and
 `agent_available`, the log confirms NAT LLM/plugin registration, and a small
-real `POST /api/agent/chat` NIM request succeeds. The laptop-side
-`--check-ports` path also probes 8012/TCP.
+real `POST /api/agent/chat` NIM request succeeds. Agent readiness is best-effort:
+dependency, capacity, or smoke-test failures produce a warning but do not fail a
+Launchable whose renderer is ready. The laptop-side `--check-ports` path also
+probes 8012/TCP.

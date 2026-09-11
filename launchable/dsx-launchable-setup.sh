@@ -394,6 +394,9 @@ if [ -n "${NVIDIA_API_KEY:-}" ]; then
   else
     warn "AI agent did not load its NIM registrations on $AGENT_PORT/TCP"
   fi
+  if [ "$AGENT_READY" -ne 1 ]; then
+    warn "AI agent is optional; continuing because the DSX viewer is ready"
+  fi
 else
   info "AI agent disabled (NVIDIA_API_KEY launch parameter was not supplied)"
 fi
@@ -418,7 +421,7 @@ $( case "$LS_VERS" in
 
   AI agent: $( if [ -z "${NVIDIA_API_KEY:-}" ]; then
                  echo "disabled (no NVIDIA_API_KEY)"
-               elif [ "$AGENT_READY" -eq 1 ]; then echo "ready"; else echo "NOT READY"; fi )
+               elif [ "$AGENT_READY" -eq 1 ]; then echo "ready"; else echo "NOT READY (optional; viewer is available)"; fi )
 
   Ports this Launchable must declare:
     8081/TCP   web UI
@@ -437,6 +440,3 @@ $( case "$LS_VERS" in
 ============================================================
 BANNER
 [ "$READY" -eq 1 ] || exit 1
-if [ -n "${NVIDIA_API_KEY:-}" ] && [ "$AGENT_READY" -ne 1 ]; then
-  exit 1
-fi

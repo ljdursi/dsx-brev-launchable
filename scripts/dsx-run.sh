@@ -527,13 +527,13 @@ cmd_start() {
       start_kit "$pub_ip"
       wait_ready "$READY_TIMEOUT" || rc=$?
     elif [ "$repair_rc" -eq 2 ]; then
-      rc=1
+      warn "AI agent dependency repair failed; continuing because the viewer is ready"
     fi
   fi
   check_livestream_versions
   diagnose || true
   if [ "$rc" -eq 0 ]; then
-    wait_agent_ready || rc=1
+    wait_agent_ready || warn "AI agent is unavailable; continuing because it is optional"
   fi
   if [ "$rc" -ne 0 ]; then
     warn "not ready. Last 30 lines of $KIT_LOG:"
@@ -706,13 +706,13 @@ case "${CMD:-start}" in
                       start_kit "$pub_ip"
                       wait_ready "$READY_TIMEOUT" || rc=$?
                     elif [ "$repair_rc" -eq 2 ]; then
-                      rc=1
+                      warn "AI agent dependency repair failed; continuing because the viewer is ready"
                     fi
                   fi
                   check_livestream_versions
                   diagnose || true
                   if [ "$rc" -eq 0 ]; then
-                    wait_agent_ready || rc=1
+                    wait_agent_ready || warn "AI agent is unavailable; continuing because it is optional"
                   fi
                   if [ "$rc" -ne 0 ]; then tail -n 30 "$KIT_LOG" | sed 's/^/     /'; exit 1; fi
                   log "booth URL"; info "$(booth_url)" ;;
